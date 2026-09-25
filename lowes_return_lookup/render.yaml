@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: lowes-return-lookup
+    env: docker
+    plan: free
+    autoDeploy: true

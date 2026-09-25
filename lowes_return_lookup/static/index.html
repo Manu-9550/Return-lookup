@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Lowe's Return Timeframe Lookup</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="container">
+    <section class="hero">
+      <div class="badge">Lowe's Support Tool</div>
+      <h1>Return Timeframe Lookup</h1>
+      <p>Enter a Lowe's Item # or Manufacturer Model # to find the product and its applicable return window.</p>
+
+      <form id="lookupForm">
+        <div class="search-row">
+          <input id="query" autocomplete="off" placeholder="Example: 6913252 or LT09S2000W" required>
+          <button id="searchBtn" type="submit">Search</button>
+        </div>
+      </form>
+      <p class="hint">The result is based on product information found on Lowe's and the current Lowe's Returns Policy.</p>
+    </section>
+
+    <section id="loading" class="card hidden">
+      <div class="spinner"></div>
+      <span>Searching Lowe's…</span>
+    </section>
+
+    <section id="error" class="card error hidden"></section>
+
+    <section id="result" class="hidden">
+      <div class="card product-card">
+        <div class="result-head">
+          <div>
+            <div class="eyebrow">PRODUCT FOUND</div>
+            <h2 id="productName"></h2>
+          </div>
+          <a id="productLink" target="_blank" rel="noopener">View on Lowe's ↗</a>
+        </div>
+
+        <div class="details">
+          <div><span>Item #</span><strong id="itemNumber">—</strong></div>
+          <div><span>Model #</span><strong id="modelNumber">—</strong></div>
+          <div><span>Category</span><strong id="category">—</strong></div>
+        </div>
+      </div>
+
+      <div class="return-card">
+        <div class="eyebrow">RETURN TIMEFRAME</div>
+        <div id="timeframe" class="timeframe"></div>
+        <h3 id="policyCategory"></h3>
+        <p id="reason"></p>
+        <div id="notes" class="notes hidden"></div>
+      </div>
+
+      <div class="card source-card">
+        <strong>Policy source</strong>
+        <a id="policyLink" target="_blank" rel="noopener">Lowe's Returns, Refunds & Exchanges ↗</a>
+        <p>Always verify the customer's purchase conditions, proof of purchase, account/payment method, delivery/pickup date, and any applicable exception before confirming eligibility.</p>
+      </div>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
