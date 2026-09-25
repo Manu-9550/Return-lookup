@@ -1,6 +1,7 @@
 import re
 from urllib.parse import quote, urljoin
 
+import requests
 from bs4 import BeautifulSoup
 
 from .policy import get_return_policy, POLICY_URL
@@ -14,387 +15,568 @@ USER_AGENT = (
     "Chrome/154.0.0.0 Safari/537.36"
 )
 
+REQUEST_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": (
+        "text/html,application/xhtml+xml,"
+        "application/xml;q=0.9,image/avif,"
+        "image/webp,*/*;q=0.8"
+    ),
+}
 
-def clean_text(value: str) -> str:
-    """Normalize whitespace."""
+
+def clean_text(value):
     if not value:
         return ""
+
     return re.sub(r"\s+", " ", value).strip()
 
 
-def normalize_value(value: str) -> str:
-    """Normalize item/model numbers for comparison."""
+def normalize_value(value):
     if not value:
         return ""
-    return re.sub(r"[^a-zA-Z0-9]", "", value).upper()
+
+    return re.sub(
+        r"[^A-Z0-9]",
+        "",
+        value.upper()
+    )
 
 
-def extract_number(text: str, label: str):
+def extract_number(text, label):
     """
     Extract Item # or Model # from page text.
     """
+
     if not text:
         return None
 
-    pattern = rf"{re.escape(label)}\s*#?\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9._\-/]*)"
+    patterns = [
+        rf"{re.escape(label)}\s*#?\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9._\-/]*)",
+        rf"{re.escape(label)}\s+Number\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9._\-/]*)",
+    ]
 
-    match = re.search(pattern, text, re.IGNORECASE)
+    for pattern in patterns:
 
-    if match:
-        return match.group(1).strip()
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
+
+        if match:
+            return match.group(1).strip()
 
     return None
 
 
-def extract_product_links(soup: BeautifulSoup):
+def extract_product_links(soup):
     """
-    Extract Lowe's product (/pd/) links from a page.
+    Extract Lowe's /pd/ product URLs.
     """
 
-    results = []
+    products = []
     seen = set()
 
-    for a in soup.find_all("a", href=True):
+    for link in soup.find_all("a", href=True):
 
-        href = a.get("href", "").strip()
+        href = link.get("href", "").strip()
 
         if not href:
             continue
 
-        # Lowe's product pages use /pd/
-        if "/pd/" not in href:
+        if "/pd/" not in href.lower():
             continue
 
-        href = urljoin(LOWES_BASE, href)
+        href = urljoin(
+            LOWES_BASE,
+            href
+        )
 
-        # Remove query parameters/fragments.
-        href = href.split("?")[0].split("#")[0]
+        href = href.split("?")[0]
+        href = href.split("#")[0]
 
         if href in seen:
             continue
 
         seen.add(href)
 
-        title = clean_text(a.get_text(" ", strip=True))
-
-        results.append({
+        products.append({
             "url": href,
-            "title": title
+            "title": clean_text(
+                link.get_text(
+                    " ",
+                    strip=True
+                )
+            )
         })
 
-    return results
+    return products
 
 
-async def create_browser(playwright):
+# ============================================================
+# METHOD 1
+# LOWE'S DIRECT SEARCH
+# ============================================================
+
+def lowes_direct_search(query):
     """
-    Create a Chromium browser suitable for Render/Docker.
-    """
+    Try Lowe's search page using requests.
 
-    browser = await playwright.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--no-zygote",
-            "--disable-blink-features=AutomationControlled",
-        ],
-    )
-
-    return browser
-
-
-async def get_page(playwright, browser):
-    """
-    Create a browser page with realistic headers.
+    This is a fallback because Lowe's search can be
+    JavaScript-rendered or protected.
     """
 
-    context = await browser.new_context(
-        user_agent=USER_AGENT,
-        viewport={
-            "width": 1366,
-            "height": 900,
-        },
-        locale="en-US",
-        timezone_id="America/New_York",
-        extra_http_headers={
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept": (
-                "text/html,application/xhtml+xml,"
-                "application/xml;q=0.9,image/avif,"
-                "image/webp,*/*;q=0.8"
-            ),
-        },
-    )
-
-    page = await context.new_page()
-
-    return context, page
-
-
-async def search_lowes(page, query: str):
-    """
-    Search Lowe's using its public search page.
-
-    We intentionally use several attempts because Lowe's search
-    results are dynamically rendered.
-    """
-
-    search_url = (
-        f"{LOWES_BASE}/search?searchTerm={quote(query)}"
+    url = (
+        f"{LOWES_BASE}/search"
+        f"?searchTerm={quote(query)}"
     )
 
     try:
 
-        await page.goto(
-            search_url,
-            wait_until="domcontentloaded",
-            timeout=60000,
+        response = requests.get(
+            url,
+            headers=REQUEST_HEADERS,
+            timeout=25,
         )
 
-    except Exception:
-        # Continue and inspect whatever page was returned.
-        pass
+        if response.status_code != 200:
+            return []
 
-    # Give Lowe's JavaScript time to populate results.
-    await page.wait_for_timeout(5000)
-
-    # Wait for possible product links.
-    try:
-
-        await page.wait_for_selector(
-            'a[href*="/pd/"]',
-            timeout=15000,
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
         )
 
+        return extract_product_links(soup)
+
     except Exception:
-        pass
+        return []
 
-    # Small additional delay for dynamically loaded results.
-    await page.wait_for_timeout(2500)
 
-    html = await page.content()
+# ============================================================
+# METHOD 2
+# BING SEARCH
+# ============================================================
 
-    soup = BeautifulSoup(
-        html,
-        "html.parser",
+def bing_search(query):
+    """
+    Search Bing for Lowe's product pages.
+
+    Example query:
+
+    site:lowes.com/pd/ WRS315SDHZ
+    """
+
+    search_query = (
+        f"site:lowes.com/pd/ {query}"
     )
 
-    links = extract_product_links(soup)
+    url = (
+        "https://www.bing.com/search"
+        f"?q={quote(search_query)}"
+    )
 
-    return search_url, links
+    products = []
 
+    try:
+
+        response = requests.get(
+            url,
+            headers=REQUEST_HEADERS,
+            timeout=25,
+        )
+
+        if response.status_code != 200:
+            return []
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+        # Normal Bing result links
+        for result in soup.select("li.b_algo"):
+
+            anchor = result.find(
+                "a",
+                href=True
+            )
+
+            if not anchor:
+                continue
+
+            href = anchor.get("href", "")
+
+            if "lowes.com/pd/" not in href.lower():
+                continue
+
+            href = href.split("?")[0]
+            href = href.split("#")[0]
+
+            if href not in [
+                x["url"] for x in products
+            ]:
+
+                products.append({
+                    "url": href,
+                    "title": clean_text(
+                        anchor.get_text(
+                            " ",
+                            strip=True
+                        )
+                    )
+                })
+
+        # Additional fallback:
+        # scan all anchors.
+        if not products:
+
+            for anchor in soup.find_all(
+                "a",
+                href=True
+            ):
+
+                href = anchor.get(
+                    "href",
+                    ""
+                )
+
+                if "lowes.com/pd/" not in href.lower():
+                    continue
+
+                href = href.split("?")[0]
+                href = href.split("#")[0]
+
+                if href not in [
+                    x["url"] for x in products
+                ]:
+
+                    products.append({
+                        "url": href,
+                        "title": clean_text(
+                            anchor.get_text(
+                                " ",
+                                strip=True
+                            )
+                        )
+                    })
+
+        return products
+
+    except Exception:
+        return []
+
+
+# ============================================================
+# METHOD 3
+# GOOGLE SEARCH FALLBACK
+# ============================================================
+
+def google_search(query):
+    """
+    Additional search-engine fallback.
+
+    Searches specifically for Lowe's product pages.
+    """
+
+    search_query = (
+        f"site:lowes.com/pd/ {query}"
+    )
+
+    url = (
+        "https://www.google.com/search"
+        f"?q={quote(search_query)}"
+    )
+
+    products = []
+
+    try:
+
+        response = requests.get(
+            url,
+            headers=REQUEST_HEADERS,
+            timeout=25,
+        )
+
+        if response.status_code != 200:
+            return []
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+        for anchor in soup.find_all(
+            "a",
+            href=True
+        ):
+
+            href = anchor.get(
+                "href",
+                ""
+            )
+
+            # Google sometimes wraps URLs.
+            if "/url?q=" in href:
+
+                href = href.split(
+                    "/url?q=",
+                    1
+                )[1]
+
+                href = href.split(
+                    "&",
+                    1
+                )[0]
+
+            if "lowes.com/pd/" not in href.lower():
+                continue
+
+            href = href.split("?")[0]
+            href = href.split("#")[0]
+
+            if href not in [
+                x["url"] for x in products
+            ]:
+
+                products.append({
+                    "url": href,
+                    "title": clean_text(
+                        anchor.get_text(
+                            " ",
+                            strip=True
+                        )
+                    )
+                })
+
+        return products
+
+    except Exception:
+        return []
+
+
+# ============================================================
+# SCORE SEARCH RESULTS
+# ============================================================
 
 def score_candidate(candidate, query):
     """
-    Score a Lowe's product candidate.
+    Rank candidate Lowe's pages.
 
-    Exact model/item number matches are preferred.
+    Exact model/item number matches receive
+    a very high score.
     """
 
-    query_normalized = normalize_value(query)
+    query_normalized = normalize_value(
+        query
+    )
 
-    text = normalize_value(
-        candidate.get("title", "")
+    title = normalize_value(
+        candidate.get(
+            "title",
+            ""
+        )
+    )
+
+    url = normalize_value(
+        candidate.get(
+            "url",
+            ""
+        )
+    )
+
+    combined = (
+        title
         + " "
-        + candidate.get("url", "")
+        + url
     )
 
     score = 0
 
-    if query_normalized and query_normalized in text:
-        score += 100
+    # Exact query occurrence
+    if query_normalized in combined:
+        score += 200
 
-    # Model numbers are usually longer and more distinctive.
-    if len(query_normalized) >= 6:
-        score += 10
+    # Product page
+    if "/PD/" in candidate.get(
+        "url",
+        ""
+    ).upper():
 
-    # Prefer actual product pages.
-    if "/pd/" in candidate.get("url", ""):
-        score += 20
+        score += 50
+
+    # Model number in title
+    if query_normalized in title:
+        score += 300
 
     return score
 
 
-async def inspect_product_page(page, product_url, query):
-    """
-    Open the Lowe's product page and extract product information.
-    """
+# ============================================================
+# EXTRACT PRODUCT PAGE
+# ============================================================
 
-    try:
-
-        await page.goto(
-            product_url,
-            wait_until="domcontentloaded",
-            timeout=60000,
-        )
-
-    except Exception:
-        # The page may still have loaded enough information.
-        pass
-
-    # Allow product information to render.
-    await page.wait_for_timeout(4000)
-
-    html = await page.content()
+def extract_product_data(
+    html,
+    product_url,
+    query
+):
 
     soup = BeautifulSoup(
         html,
-        "html.parser",
+        "html.parser"
     )
 
     text = clean_text(
         soup.get_text(
             " ",
-            strip=True,
+            strip=True
         )
     )
 
-    # ---------------------------------------------------------
-    # ITEM NUMBER
-    # ---------------------------------------------------------
-
-    item_number = extract_number(
-        text,
-        "Item",
-    )
-
-    # ---------------------------------------------------------
-    # MODEL NUMBER
-    # ---------------------------------------------------------
-
-    model_number = extract_number(
-        text,
-        "Model",
-    )
-
-    # ---------------------------------------------------------
-    # PRODUCT TITLE
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
+    # TITLE
+    # --------------------------------------------------------
 
     product_name = ""
 
-    # Try OpenGraph title first.
     og_title = soup.find(
         "meta",
-        property="og:title",
+        property="og:title"
     )
 
     if og_title:
+
         product_name = clean_text(
-            og_title.get("content", "")
+            og_title.get(
+                "content",
+                ""
+            )
         )
 
-    # Try normal HTML title.
     if not product_name:
 
-        title_tag = soup.find("title")
+        title_tag = soup.find(
+            "title"
+        )
 
         if title_tag:
+
             product_name = clean_text(
                 title_tag.get_text(
                     " ",
-                    strip=True,
+                    strip=True
                 )
             )
 
-    # Remove Lowe's suffix.
     product_name = re.sub(
         r"\s*\|\s*Lowe'?s.*$",
         "",
         product_name,
-        flags=re.IGNORECASE,
+        flags=re.IGNORECASE
     ).strip()
 
-    # ---------------------------------------------------------
-    # CATEGORY
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
+    # ITEM NUMBER
+    # --------------------------------------------------------
+
+    item_number = extract_number(
+        text,
+        "Item"
+    )
+
+    # --------------------------------------------------------
+    # MODEL NUMBER
+    # --------------------------------------------------------
+
+    model_number = extract_number(
+        text,
+        "Model"
+    )
+
+    # --------------------------------------------------------
+    # JSON-LD
+    # --------------------------------------------------------
 
     category = ""
 
-    # First inspect JSON-LD from the PRODUCT PAGE.
-    # The previous version accidentally inspected the search page.
-    scripts = soup.find_all(
+    for script in soup.find_all(
         "script",
-        type="application/ld+json",
-    )
-
-    for script in scripts:
+        type="application/ld+json"
+    ):
 
         raw = script.get_text(
             " ",
-            strip=True,
+            strip=True
         )
 
         if not raw:
             continue
 
-        # Category field.
-        category_match = re.search(
+        match = re.search(
             r'"category"\s*:\s*"([^"]+)"',
             raw,
-            re.IGNORECASE,
+            re.IGNORECASE
         )
 
-        if category_match:
+        if match:
 
             category = clean_text(
-                category_match.group(1)
+                match.group(1)
             )
 
             if category:
                 break
 
-    # ---------------------------------------------------------
-    # BREADCRUMBS
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
+    # BREADCRUMB FALLBACK
+    # --------------------------------------------------------
 
     if not category:
 
-        breadcrumb_selectors = [
+        selectors = [
             '[aria-label*="breadcrumb" i]',
             '[data-testid*="breadcrumb" i]',
-            'nav',
+            "nav"
         ]
 
-        for selector in breadcrumb_selectors:
+        for selector in selectors:
 
-            try:
+            elements = soup.select(
+                selector
+            )
 
-                elements = soup.select(selector)
+            for element in elements:
 
-                for element in elements:
-
-                    breadcrumb_text = clean_text(
-                        element.get_text(
-                            " ",
-                            strip=True,
-                        )
+                value = clean_text(
+                    element.get_text(
+                        " ",
+                        strip=True
                     )
+                )
 
-                    if (
-                        breadcrumb_text
-                        and len(breadcrumb_text) < 500
-                    ):
-                        category = breadcrumb_text
-                        break
+                if (
+                    value
+                    and len(value) < 500
+                ):
 
-                if category:
+                    category = value
                     break
 
-            except Exception:
-                continue
+            if category:
+                break
 
-    # ---------------------------------------------------------
-    # FALLBACK CATEGORY FROM PRODUCT NAME
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
+    # PRODUCT NAME CATEGORY FALLBACK
+    # --------------------------------------------------------
 
     if not category:
 
-        name_lower = product_name.lower()
+        lower_name = product_name.lower()
 
-        category_keywords = [
+        categories = [
             "refrigerator",
             "freezer",
             "dishwasher",
@@ -416,18 +598,20 @@ async def inspect_product_page(page, product_url, query):
             "tile saw",
         ]
 
-        for keyword in category_keywords:
+        for keyword in categories:
 
-            if keyword in name_lower:
+            if keyword in lower_name:
 
                 category = keyword.title()
                 break
 
-    # ---------------------------------------------------------
-    # EXTRA VALIDATION
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
+    # EXACT MATCH
+    # --------------------------------------------------------
 
-    query_normalized = normalize_value(query)
+    query_normalized = normalize_value(
+        query
+    )
 
     item_normalized = normalize_value(
         item_number or ""
@@ -437,15 +621,11 @@ async def inspect_product_page(page, product_url, query):
         model_number or ""
     )
 
-    exact_match = False
-
-    if query_normalized:
-
-        if query_normalized == item_normalized:
-            exact_match = True
-
-        if query_normalized == model_normalized:
-            exact_match = True
+    exact_match = (
+        query_normalized == item_normalized
+        or
+        query_normalized == model_normalized
+    )
 
     return {
         "item_number": item_number,
@@ -458,257 +638,235 @@ async def inspect_product_page(page, product_url, query):
     }
 
 
-async def lookup_product(query: str):
+# ============================================================
+# FETCH PRODUCT PAGE
+# ============================================================
 
-    query = clean_text(query)
+def fetch_product_page(
+    product_url
+):
+
+    try:
+
+        response = requests.get(
+            product_url,
+            headers=REQUEST_HEADERS,
+            timeout=30,
+        )
+
+        if response.status_code != 200:
+            return None
+
+        return response.text
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# MAIN LOOKUP FUNCTION
+# ============================================================
+
+async def lookup_product(query):
+
+    query = clean_text(
+        query
+    )
 
     if not query:
 
         return {
             "found": False,
-            "query": query,
-            "message": "Enter an item number or model number.",
+            "query": "",
+            "message": (
+                "Please enter a Lowe's "
+                "Item # or Model #."
+            ),
             "policy_url": POLICY_URL,
         }
 
-    try:
+    candidates = []
 
-        from playwright.async_api import async_playwright
+    # ========================================================
+    # METHOD 1 — LOWE'S DIRECT SEARCH
+    # ========================================================
 
-    except ImportError:
-
-        raise RuntimeError(
-            "Playwright is not installed. "
-            "Run: pip install -r requirements.txt "
-            "&& playwright install chromium"
+    candidates.extend(
+        lowes_direct_search(
+            query
         )
-
-    search_url = (
-        f"{LOWES_BASE}/search?searchTerm={quote(query)}"
     )
 
-    async with async_playwright() as playwright:
+    # ========================================================
+    # METHOD 2 — BING
+    # ========================================================
 
-        browser = await create_browser(
-            playwright
+    candidates.extend(
+        bing_search(
+            query
+        )
+    )
+
+    # ========================================================
+    # METHOD 3 — GOOGLE
+    # ========================================================
+
+    candidates.extend(
+        google_search(
+            query
+        )
+    )
+
+    # ========================================================
+    # REMOVE DUPLICATES
+    # ========================================================
+
+    unique = {}
+
+    for candidate in candidates:
+
+        url = candidate.get(
+            "url"
         )
 
-        context, page = await get_page(
-            playwright,
-            browser,
+        if not url:
+            continue
+
+        unique[url] = candidate
+
+    candidates = list(
+        unique.values()
+    )
+
+    # ========================================================
+    # NO SEARCH RESULT
+    # ========================================================
+
+    if not candidates:
+
+        return {
+            "found": False,
+            "query": query,
+            "message": (
+                "No Lowe's product page could "
+                "be found for this item/model number."
+            ),
+            "policy_url": POLICY_URL,
+        }
+
+    # ========================================================
+    # RANK RESULTS
+    # ========================================================
+
+    candidates.sort(
+        key=lambda candidate:
+        score_candidate(
+            candidate,
+            query
+        ),
+        reverse=True
+    )
+
+    # ========================================================
+    # CHECK UP TO 5 PRODUCT PAGES
+    # ========================================================
+
+    best_product = None
+
+    for candidate in candidates[:5]:
+
+        product_url = candidate.get(
+            "url"
         )
 
-        try:
+        if not product_url:
+            continue
 
-            # -------------------------------------------------
-            # STEP 1 — SEARCH LOWE'S
-            # -------------------------------------------------
+        html = fetch_product_page(
+            product_url
+        )
 
-            search_url, candidates = await search_lowes(
-                page,
-                query,
-            )
+        if not html:
+            continue
 
-            # -------------------------------------------------
-            # STEP 2 — IF SEARCH LINKS WERE NOT FOUND,
-            # TRY A SECOND SEARCH FORMAT
-            # -------------------------------------------------
+        product = extract_product_data(
+            html,
+            product_url,
+            query
+        )
 
-            if not candidates:
+        # Exact match = stop immediately
+        if product["exact_match"]:
 
-                alternate_url = (
-                    f"{LOWES_BASE}/search?"
-                    f"searchTerm={quote(query)}"
-                    f"&sortMethod=sortBy_featured"
-                )
+            best_product = product
+            break
 
-                try:
+        # Otherwise keep first usable result
+        if (
+            best_product is None
+            and product["product_name"]
+        ):
 
-                    await page.goto(
-                        alternate_url,
-                        wait_until="domcontentloaded",
-                        timeout=60000,
-                    )
+            best_product = product
 
-                except Exception:
-                    pass
+    # ========================================================
+    # NOTHING USABLE
+    # ========================================================
 
-                await page.wait_for_timeout(
-                    5000
-                )
+    if not best_product:
 
-                try:
+        return {
+            "found": False,
+            "query": query,
+            "message": (
+                "A Lowe's search result was found, "
+                "but the product page could not "
+                "be read."
+            ),
+            "policy_url": POLICY_URL,
+        }
 
-                    await page.wait_for_selector(
-                        'a[href*="/pd/"]',
-                        timeout=12000,
-                    )
+    # ========================================================
+    # APPLY RETURN POLICY
+    # ========================================================
 
-                except Exception:
-                    pass
+    policy = get_return_policy(
+        best_product["product_name"],
+        best_product["category"]
+    )
 
-                await page.wait_for_timeout(
-                    2000
-                )
+    # ========================================================
+    # FINAL RESPONSE
+    # ========================================================
 
-                html = await page.content()
+    return {
+        "found": True,
 
-                soup = BeautifulSoup(
-                    html,
-                    "html.parser",
-                )
+        "query": query,
 
-                candidates = extract_product_links(
-                    soup
-                )
+        "item_number": (
+            best_product["item_number"]
+        ),
 
-            # -------------------------------------------------
-            # STEP 3 — NO PRODUCTS FOUND
-            # -------------------------------------------------
+        "model_number": (
+            best_product["model_number"]
+        ),
 
-            if not candidates:
+        "product_name": (
+            best_product["product_name"]
+            or "Lowe's Product"
+        ),
 
-                return {
-                    "found": False,
-                    "query": query,
-                    "message": (
-                        "Lowe's search did not return a "
-                        "product page for this item/model number."
-                    ),
-                    "search_url": search_url,
-                    "policy_url": POLICY_URL,
-                }
+        "category": (
+            best_product["category"]
+        ),
 
-            # -------------------------------------------------
-            # STEP 4 — RANK SEARCH RESULTS
-            # -------------------------------------------------
+        "product_url": (
+            best_product["product_url"]
+        ),
 
-            candidates.sort(
-                key=lambda candidate: score_candidate(
-                    candidate,
-                    query,
-                ),
-                reverse=True,
-            )
+        "policy_url": POLICY_URL,
 
-            # Inspect several candidates instead of blindly
-            # choosing the first one.
-            candidates_to_check = candidates[:5]
-
-            best_product = None
-
-            product_context = None
-
-            for candidate in candidates_to_check:
-
-                product_url = candidate["url"]
-
-                try:
-
-                    product_context = await context.new_page()
-
-                    product_data = (
-                        await inspect_product_page(
-                            product_context,
-                            product_url,
-                            query,
-                        )
-                    )
-
-                    # Exact item/model match gets priority.
-                    if product_data["exact_match"]:
-
-                        best_product = product_data
-                        break
-
-                    # Keep the first valid product as fallback.
-                    if (
-                        best_product is None
-                        and product_data["product_name"]
-                    ):
-                        best_product = product_data
-
-                except Exception:
-                    continue
-
-                finally:
-
-                    if product_context:
-
-                        try:
-                            await product_context.close()
-                        except Exception:
-                            pass
-
-                        product_context = None
-
-            # -------------------------------------------------
-            # STEP 5 — NO VALID PRODUCT PAGE
-            # -------------------------------------------------
-
-            if not best_product:
-
-                return {
-                    "found": False,
-                    "query": query,
-                    "message": (
-                        "Lowe's product pages were found, "
-                        "but the product information could "
-                        "not be extracted."
-                    ),
-                    "search_url": search_url,
-                    "policy_url": POLICY_URL,
-                }
-
-            # -------------------------------------------------
-            # STEP 6 — APPLY RETURN POLICY
-            # -------------------------------------------------
-
-            policy = get_return_policy(
-                best_product["product_name"],
-                best_product["category"],
-            )
-
-            return {
-                "found": True,
-                "query": query,
-
-                "item_number": (
-                    best_product["item_number"]
-                ),
-
-                "model_number": (
-                    best_product["model_number"]
-                ),
-
-                "product_name": (
-                    best_product["product_name"]
-                    or "Lowe's product"
-                ),
-
-                "category": (
-                    best_product["category"]
-                ),
-
-                "product_url": (
-                    best_product["product_url"]
-                ),
-
-                "search_url": search_url,
-
-                "policy_url": POLICY_URL,
-
-                **policy,
-            }
-
-        finally:
-
-            try:
-                await context.close()
-            except Exception:
-                pass
-
-            try:
-                await browser.close()
-            except Exception:
-                pass
+        **policy,
+    }
