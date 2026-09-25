@@ -356,10 +356,64 @@ def score_product(product, query):
 # PLAYWRIGHT PRODUCT PAGE
 # ============================================================
 
-async def read_lowes_product_page(
-    page,
-    product_url
-):
+async def read_lowes_product_page(page, product_url):
+    try:
+        print(f"[LOWES] Opening: {product_url}")
+
+        response = await page.goto(
+            product_url,
+            wait_until="domcontentloaded",
+            timeout=90000
+        )
+
+        status = response.status if response else "NO_RESPONSE"
+        final_url = page.url
+        title = await page.title()
+
+        print(f"[LOWES] HTTP status: {status}")
+        print(f"[LOWES] Final URL: {final_url}")
+        print(f"[LOWES] Page title: {title}")
+
+        await page.wait_for_timeout(10000)
+
+        html = await page.content()
+
+        print(f"[LOWES] HTML length: {len(html)}")
+
+        lower_html = html.lower()
+
+        # Detect common blocking/challenge pages
+        blocked_words = [
+            "captcha",
+            "verify you are human",
+            "access denied",
+            "unusual traffic",
+            "robot",
+            "challenge",
+            "security check",
+            "blocked"
+        ]
+
+        detected = [word for word in blocked_words if word in lower_html]
+
+        if detected:
+            print(f"[LOWES] Possible block detected: {detected}")
+
+        # Save a small diagnostic snapshot
+        print("[LOWES] Body preview:")
+        print(lower_html[:2000])
+
+        if len(html) < 5000:
+            raise Exception(
+                f"Lowe's page returned very little HTML "
+                f"(length={len(html)}, status={status}, title={title})"
+            )
+
+        return html
+
+    except Exception as e:
+        print(f"[LOWES] ERROR reading product page: {type(e).__name__}: {e}")
+        return None
 
     try:
 
