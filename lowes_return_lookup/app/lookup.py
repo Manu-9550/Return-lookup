@@ -841,7 +841,11 @@ async def lookup_product(query):
 
                         best_product = product
 
-                except Exception:
+               except Exception as e:
+                print(
+                    f"[LOOKUP] Failed candidate {product_url}: "
+                    f"{type(e).__name__}: {e}"
+                    )
                     continue
 
         finally:
